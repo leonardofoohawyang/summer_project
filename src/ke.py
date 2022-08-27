@@ -1,116 +1,124 @@
-from sklearn.feature_extraction.text import CountVectorizer
-from keybert import KeyBERT
-import jieba
-
+import os
+import random
 import nltk
-from nltk.corpus import stopwords 
-from nltk.tokenize import word_tokenize, sent_tokenize
+from nltk.corpus import wordnet as wn
+from googletrans import Translator
+from google.cloud import language_v1
 
-import jieba.analyse
-import jieba.posseg
 
-def keybert_sample():
-    def tokenize_zh(text):
-        words = jieba.lcut(text)
-        return words
+class Clause:
+    def __init__(self):
+        self.sobj = []
+        self.pobj = [] 
+        self.adp = 'None'  
 
-    vectorizer = CountVectorizer(tokenizer=tokenize_zh)
+    def insert_sobj(self, sobj):
+        self.sobj.append(sobj)
 
-    doc = "我想吃蘋果"
+    def insert_pobj(self, pobj):
+        self.pobj.append(pobj)
 
-    kw_model = KeyBERT()
+    def insert_adp(self, adp):
+      if adp in ['on', 'above']:
+        self.adp = 'up'
+      elif adp in ['under', 'below']:
+        self.adp = 'down'
+      elif adp in ['left']:
+        self.adp = 'left'
+      elif adp in ['right']:
+        self.adp = 'right'
+      elif adp in ['beside', 'by', 'to', 'with']:
+        self.adp = random.choice(['left', 'right'])
+      else:
+        self.adp = adp
 
-    keywords = kw_model.extract_keywords(doc, vectorizer=vectorizer)
+    def getRelation(self):
+      return {'sobj': self.sobj, 'pobj': self.pobj, 'adp': self.adp}
 
-    print(keywords)
+def in_checklist(noun, english_class):
+    if noun in english_class:
+        return noun;
+    else:
+        for syn in wn.synsets(noun, pos=wn.NOUN):
+            for l in syn.lemmas():
+                if str(l) in english_class:
+                    return l;
+    return None;
 
-    """
-    keywords = [('我', 0.7183), ('蘋果', 0.5982), ('想', 0.5003), ('吃', 0.5003)]
-    """
+def keyword_extraction(content_text):
+  #Credentials for google Cloud NLP
+  api_key_path = '../content/summer-factor-355116-e0708ce86ad5.json'
+  os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = api_key_path
 
-    return None
+  #Making Dictionary
+  fd = open('../content/English_Classes.txt', "r")
+  data = fd.read()
+  english_class = data.split("\n")
+  fd.close()
 
-def nltk_sample():
-    nltk.download('all', download_dir='./nltk_data')
-    def ProperNounExtractor(text):
-        print('PROPER NOUNS EXTRACTED :')
-        
-        sentences = nltk.sent_tokenize(text)
-        for sentence in sentences:
-            words = nltk.word_tokenize(sentence)
-            words = [word for word in words if word not in set(stopwords.words('english'))]
-            tagged = nltk.pos_tag(words)
-            for (word, tag) in tagged:
-                print(word, tag)
-                #if tag == 'NN': # If the word is a proper noun
-                    #print(word)
+  #Translation
+  translator = Translator()
+  translation = translator.translate(content_text, src='zh-tw', dest='en') #a set that includes src, dest, text, pronouciation, extra_data
+  
+  #Part of Speech Segmentation
+  #Documentation Link: https://googleapis.dev/python/language/latest/index.html
+  client = language_v1.LanguageServiceClient()
+  language = "en"
+  type_ = language_v1.Document.Type.PLAIN_TEXT
 
-    text =  "Rohan is a wonderful player. He was born in India. He is a fan of the movie Wolverine. He has a dog named Bruno."
+  tokenized_sentences=nltk.sent_tokenize(translation.text)
+  
+  ret = []
+  clauses = []
+  for i in range(len(tokenized_sentences)):
+    clauses.append(Clause())
 
-    keywords = ProperNounExtractor(text)
+    document = {"content": tokenized_sentences[i], "type_": type_, "language": language}
+    #encoding_type = enums.EncodingType.UTF8
+    response = client.analyze_syntax(document=document, encoding_type='UTF8')
 
-    """
-    PROPER NOUNS EXTRACTED :
-    Rohan NNP
-    wonderful JJ
-    player NN
-    . .
-    He PRP
-    born VBZ
-    India NNP
-    . .
-    He PRP
-    fan VBZ
-    movie NN
-    Wolverine NNP
-    . .
-    He PRP
-    dog VBZ
-    named VBN
-    Bruno NNP
-    . .
-    """
+    nsubj = -1
+    pobj = -1
+    word_location = -1
 
-    print(keywords)
+    for token in response.tokens:
+      #print(token)
+      word_location = word_location + 1
+      part_of_speech = token.part_of_speech #includes Tag, Voice, Tense
+      tag = language_v1.PartOfSpeech.Tag(part_of_speech.tag).name
+      dependency_edge = token.dependency_edge
+      label = language_v1.DependencyEdge.Label(dependency_edge.label).name
+      if tag == "NOUN":
+        root = token.lemma
+        exist = in_checklist(root, english_class)
+        if exist != None:
+          if label == "POBJ":
+            clauses[i].insert_pobj(exist)
+            pobj = word_location
+          elif label == "NSUBJ":
+            clauses[i].insert_sobj(exist)
+            nsubj = word_location
+          elif label == "DOBJ":
+            if not clauses[i].sobj:
+              clauses[i].insert_sobj(exist)
+              nsubj = word_location
+            else:
+              clauses[i].insert_pobj(exist)
+              pobj = word_location
+          elif label == "CONJ" and dependency_edge.head_token_index == nsubj:
+            clauses[i].insert_sobj(exist)
+          elif label == "CONJ" and dependency_edge.head_token_index == pobj:
+            clauses[i].insert_pobj(exist)
+      elif tag == "ADP" and clauses[i].adp == 'None':
+        clauses[i].insert_adp(token.lemma)
+      elif token.lemma == "right" or token.lemma == "left":
+        if label == "AMOD":
+          clauses[i].insert_adp(token.lemma)
+    
+    ret.append(clauses[i].getRelation())
 
-    return None
+  return ret
 
-def nltk_jieba_sample():
-    nltk.download('popular', download_dir='./nltk_data')
-    text = "我前面有一棵樹. 樹周圍有很多花. 天上有星星. 右邊看到一輛車子."
-    posseg = jieba.posseg.POSTokenizer(tokenizer=None)
-    words = posseg.cut(text)
-    for word, flag in words:
-        print('%s %s' % (word, flag))
-
-    """
-    我 r
-    前面 f
-    有 v
-    一棵 m
-    樹 n
-    . m
-    x
-    樹周圍 n
-    有 v
-    很多 m
-    花 n
-    . m
-    x
-    天上 s
-    有 v
-    星星 nz
-    . x
-    x
-    右邊 f
-    看到 v
-    一輛 m
-    車子 n
-    . m
-    """
-    return None
-
-if __name__ == "__main__":
-    keybert_sample()
-    # nltk_sample()
-    # nltk_jieba_sample()
+# text = "桌子旁邊有隻貓。樹上有隻鳥。"
+# ff = keyword_extraction(text)
+# print(ff) 

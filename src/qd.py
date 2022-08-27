@@ -14,7 +14,7 @@ from dataclasses import dataclass
 @dataclass
 class QuickDraw:
   video_name: str
-
+  
   def create_spec_animation(self, obj_name: str):
 
     files = os.listdir('../simplified')

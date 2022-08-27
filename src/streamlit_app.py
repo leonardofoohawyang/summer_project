@@ -7,11 +7,10 @@ import os
 import random
 import streamlit as st
 from qd import QuickDraw
-
-import jieba
-import jieba.analyse
-import jieba.posseg
-import json
+from canvas import Canvas
+from PIL import Image
+from ke_v2 import keyword_extraction
+from googletrans import Translator
 
 # Example video code
 # https://github.com/streamlit/streamlit/blob/develop/examples/video.py
@@ -22,8 +21,8 @@ st.set_page_config(
 )
 
 st.write("""
-# 🎬 Demo
-## 📌 Paste document
+## 🎬 演示
+### 📌 請輸入任意短句
 """)
 
 
@@ -33,7 +32,7 @@ with st.form(key="form1"):
 
     with col:
         doc = st.text_area(
-            "請輸入中文句子",
+            "",
             height=300,
         )
 
@@ -52,39 +51,55 @@ with st.form(key="form1"):
 
         submit_button = st.form_submit_button(label="✨ 提取關鍵字 ✨")
 
-def nltk_sample(text: str):
-    print(nltk_sample)
-    chinese_class = open("../content/Chinese_Classes.txt", "r").read().split("\n")
-    english_class = open("../content/English_Classes.txt", "r").read().split("\n")
-    chi_eng = dict(zip(chinese_class, english_class))
 
-    posseg = jieba.posseg.POSTokenizer(tokenizer=None)
-    sentences = jieba.posseg.POSTokenizer(tokenizer=None)
-    words = posseg.cut(text)
+def addBorder(old_im):
+    w, h = old_im.size
+    new_size = (w+4, h+4)
+    new_im = Image.new("RGB", new_size)
+    box = tuple((n - o) // 2 for n, o in zip(new_size, (w, h)))
+    new_im.paste(old_im, box)
+    return new_im
 
-    for word, tag in words:
-        print(word, tag)
-        if tag == 'n':
-            return chi_eng.get(word)
-
-    return None
-
+# press the bottom
 if not submit_button:
     st.stop()
 else:
+    # Translation
+    translator = Translator()
+    translation = translator.translate(doc, src='zh-tw', dest='en') #a set that includes src, dest, text, pronouciation, extra_data
+    st.subheader('翻譯:')
+    st.write(translation.text)
     # get the keywords
-    keyword = nltk_sample(doc)
+    clauses = keyword_extraction(doc)
+    print(f'clauses: {clauses}')
+    st.subheader('關鍵字和介詞:')
+    st.write(clauses)
 
-    if keyword == None:
-        st.subheader("No keywords found!")
-    else:
-        st.subheader(f"Extracted keyword: {keyword}")
-        st.header(f"Generate {keyword} animation")
-        qd = QuickDraw('video.mp4')
-        qd.create_spec_animation(keyword)
-        video_file = open('video.mp4', 'rb')
-        video_bytes = video_file.read()
-        st.video(video_bytes)
+    objs = []
+    for clause in clauses:
+        for obj in clause['sobj']:
+            objs.append(obj)
+        for obj in clause['pobj']:
+            objs.append(obj)
+    
+    st.subheader('物件:')
+    st.write(objs)
+
+    canvas = Canvas()
+    canvas.init(rate=0.15)
+
+    for obj in objs:
+        canvas.addObj(obj, random.randint(0, 99))
+
+    canvas.addEdge(clauses)
+
+    # canvas.config()
+    im = canvas.draw()
+    
+    with st.container():
+        st.subheader('輸出:')
+        st.image(addBorder(im).resize((1920, 1080)))
+
 
 
  
