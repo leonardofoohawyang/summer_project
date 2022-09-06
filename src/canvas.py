@@ -1,10 +1,13 @@
 import os
 import math
 import random
+import uuid
 import pandas as pd
 import matplotlib.pyplot as plt
 from PIL import Image
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import ClassVar
+from collections import namedtuple
 
 # convert ndjson to png files
 def genIM(drawing: list, path: str):
@@ -51,13 +54,13 @@ def genIM(drawing: list, path: str):
     return None
 
 # Draw specific class from ndjson file
-def draw(obj_name: str, path: str, idx: int=0):
-    df = pd.read_json((f'../simplified/{obj_name}.ndjson'), lines=True, nrows=100)
+def draw(obj_name: str, path: str, idx: int=0, nrows: int=100):
+    df = pd.read_json((f'../simplified/{obj_name}.ndjson'), lines=True, nrows=nrows)
     genIM(df['drawing'][idx], path)
     return None
 
 # Generate png format files from ndjson files
-def genDataset():
+def genDataset(nrows: int=100):
     files = os.listdir('../simplified')
 
     # # Replace file's whitespace with underscore
@@ -77,22 +80,43 @@ def genDataset():
             os.mkdir(path)
 
         # generate Image by data
-        for i in range(100):
-            draw(fname, f'{path}/{fname}_{i}.png', i)
+        for i in range(nrows):
+            draw(fname, f'{path}/{fname}_{i}.png', i, nrows)
+            print(f'{path}/{fname}_{i}.png')
         
     return None
+
+
+class CanvasObj:
+
+    def __init__(self, catalog: str, pos=(-1, -1), scale: float=0.2, im=""):
+        self.id = uuid.uuid4()
+        self.catalog = catalog
+        self.pos = pos
+        self.scale = scale
+
+        w, h = im.size
+        self.w, self.h = int(w*scale), int(h*scale)
+        self.im = im.resize((self.w, self.h))
+
+    def config(self):
+        print(f'id: {self.id}')
+        print(f'catalog: {self.catalog}')
+        print(f'position: {self.pos}')
+        print(f'scale: {self.scale}')
+        print(f'width: {self.w}, height: {self.h}')
 
 
 @dataclass
 class Canvas:
 
-    def init(self, background: str='blank', rate: float=0.3):
+    def init(self, background: str='blank'):
         self.bg = background
         self.objs = []
         self.classes = {}
-        self.rate = rate
-        self.wmax, self.hmax = 0, 0
-        self.num_objs = 0
+        self.inclasses = []
+        self.max_nums = 500
+
         # Record used index for classes
         for f in os.listdir('../simplified'):
             self.classes[f[:-7]] = []
@@ -101,31 +125,22 @@ class Canvas:
         return None
 
     def addObj(self, name: str, idx: int=0):
+        if name not in self.inclasses:
+            self.inclasses.append(name)
+
         while idx in self.classes[name]:
-            idx = random.randint(0, 99)
+            idx = random.randint(0, self.max_nums-1)
         self.classes[name].append(idx)
+
         prefix = '../temp'
         path = f'{prefix}/{name}/{name}_{idx}.png'
         Im = Image.open(path)
-        w, h = Im.size
-        Im = Im.resize((int(w*self.rate), int(h*self.rate)))
-        self.wmax = max(self.wmax, int(w*self.rate))
-        self.hmax = max(self.hmax, int(h*self.rate))
-        obj = {
-            'name': name,
-            'img': Im,
-            'x': 0,
-            'y': 0,
-            'id': self.num_objs,
-            'on_canvas': False
-        }
-        
-        self.num_objs += 1
-        self.objs.append(obj)
+
+        self.objs.append(CanvasObj(catalog=name, im=Im))
         return None
     
     def addEdge(self, edges: list):
-        print(f'edges: {edges}')
+        # print(f'edges: {edges}')
 
         for edge in edges:
             for a in edge['sobj']:
@@ -133,98 +148,116 @@ class Canvas:
                     self.edges.append([a, b, edge['adp']])
         return None
 
-    def config(self):
-        print(f'background: {self.bg}')
-        print(f'Objects in canvas: {self.objs}')
-        # print(f'Classes: {self.classes}')
-        print(self.relations)
-        return None
-
     def draw(self):
         bgIm = Image.open(f'../temp/background/{self.bg}.png')
+        maxw, maxh = bgIm.size
+        paintedObjs = []
 
-        wbg, hbg = bgIm.size
-        pos_x = [x for x in range(0, wbg, self.wmax)][:-1]
-        pos_y = [y for y in range(0, hbg, self.hmax)][:-1]
+        def intersection(a, b):
+            dx = min(a.xmax, b.xmax) - max(a.xmin, b.xmin)
+            dy = min(a.ymax, b.ymax) - max(a.ymin, b.ymin)
+            if (dx>=0) and (dy>=0):
+                return dx*dy
 
-        def paste_A_on_B(A, B, adp):
-            print(f'A: {A}, B: {B}, adp: {adp}')
+        Rectangle = namedtuple('Rectangle', 'xmin ymin xmax ymax')
+        def conflict(paintedObj: list[CanvasObj], objT: CanvasObj):
+            xTmin, yTmin = objT.pos
+            rT = Rectangle(xTmin, yTmin, xTmin + objT.w, yTmin + objT.h)
+            for obj in paintedObj:
+                xmin, ymin = obj.pos
+                r = Rectangle(xmin, ymin, xmin + obj.w, ymin + obj.h)
 
-            x, y = None, None
-            for obj in self.objs:
-                if A == obj['name']:
-                    if not obj['on_canvas']:
-                        obj['on_canvas'] = True
-                        x, y = random.choice(pos_x[2:-2]), random.choice(pos_y[2:-2])
-                        obj['x'], obj['y'] = x, y
-                    else:
-                        x, y = obj['x'], obj['y']
-                    
-                    bgIm.paste(obj['img'], (x, y), obj['img'])
+                if intersection(r, rT) != None:
+                    return True
+                
+            return False
 
-            for obj in self.objs:
-                if B == obj['name']:
-                    obj['on_canvas'] = True
-                    bgIm.paste(obj['img'], (x, y + self.hmax), obj['img'])
+        def outOfbound(obj: CanvasObj):
+            xmin, ymin = obj.pos
+            xmax, ymax = xmin + obj.w, ymin + obj.h
+            if xmax > maxw or ymax > maxh:
+                return True
+            return False
 
+        def updown(objA: CanvasObj, objB: CanvasObj):
+            ax, ay = objA.pos
+            bx, by = objB.pos
+            bx = ax
+            by = ay + objA.h
+            objB.pos = (bx, by)
             return None
 
-        def paste_A_by_B(A, B, adp):
-            print(f'A: {A}, B: {B}, adp: {adp}')
-
-            x, y = None, None
-            for obj in self.objs:
-                if A == obj['name']:
-                    if not obj['on_canvas']:
-                        obj['on_canvas'] = True
-                        x, y = random.choice(pos_x[2:-2]), random.choice(pos_y[2:-2])
-                        obj['x'], obj['y'] = x, y
-                    else:
-                        x, y = obj['x'], obj['y']
-
-                    bgIm.paste(obj['img'], (x, y), obj['img'])
-
-            for obj in self.objs:
-                if B == obj['name']:
-                    obj['on_canvas'] = True
-                    bgIm.paste(obj['img'], (x + self.wmax, y), obj['img'])
-
+        def leftright(objA: CanvasObj, objB: CanvasObj):
+            ax, ay = objA.pos
+            bx, by = objB.pos
+            bx = ax + objA.w
+            by = ay
+            objB.pos = (bx, by)
             return None
-        
-        # print(self.edges)
-        # print(self.objs)
+
+        # Initial objs position
+        for obj in self.objs:
+            # while comflict, change position
+            obj.pos = (random.randint(0, maxw), random.randint(0, maxh))
+            while conflict(paintedObjs, obj) or outOfbound(obj):
+                obj.pos = (random.randint(0, maxw), random.randint(0, maxh))
+            # bgIm.paste(obj.im, obj.pos, obj.im)
+            paintedObjs.append(obj)
+
         for edge in self.edges:
             A, B, adp = edge
-            if adp == 'up':
-                paste_A_on_B(A, B, adp)
-            elif adp == 'down':
-                paste_A_on_B(B, A, adp)
-            elif adp == 'left':
-                paste_A_by_B(A, B, adp)
-            else:
-                paste_A_by_B(B, A, adp)
-        
-        for obj in self.objs:
-            if not obj['on_canvas']:
-                obj['on_canvas'] = True
-                bgIm.paste(obj['img'], (random.choice(pos_x[2:-2]), random.choice(pos_y[2:-2])), obj['img'])
-        
+            random.shuffle(paintedObjs)
+            objA, objB = None, None
+            for obj in paintedObjs:
+                if obj.catalog == A:
+                    objA = obj
+                elif obj.catalog == B:
+                    objB = obj
 
-        # outfile = 'output.png'
-        # bgIm.save(outfile)
+            if adp == 'up':
+                updown(objA, objB)
+            elif adp == 'down':
+                updown(objB, objA)
+            elif adp == 'left':
+                leftright(objA, objB)
+            elif adp == 'right':
+                leftright(objB, objA)
+        
+        for obj in paintedObjs:
+            bgIm.paste(obj.im, obj.pos, obj.im)
+
+        outfile = 'output.png'
+        bgIm.save(outfile)
 
         return bgIm
 
+    def config(self):
+        print(f'background: {self.bg}')
+        print(f'objects in canvas: {self.objs}')
+        # print(f'classes: {self.classes}')
+        print(f'edges: {self.edges}')
+        print(f'included classes: {self.inclasses}')
+
 
 def main():
-    # genDataset()
+    random.seed(2022)
+    # genDataset(500)
     canvas = Canvas()
-    canvas.init(rate=0.25)
-    canvas.addObj('cat', random.randint(0, 99))
-    canvas.addObj('dog', random.randint(0, 99))
-    canvas.addObj('duck', random.randint(0, 99))
-    # canvas.config()
+    canvas.init()
+    canvas.addObj('cat', random.randint(0, 499))
+    canvas.addObj('dog', random.randint(0, 499))
+    canvas.addObj('duck', random.randint(0, 499))
+    canvas.addObj('table', random.randint(0, 499))
+
+    clauses = [{'sobj': ['cat'], 'pobj': ['dog'], 'adp': 'right'}, {'sobj': ['duck'], 'pobj': ['table'], 'adp': 'up'}]
+    canvas.addEdge(clauses)
+
+    canvas.config()
     canvas.draw()
+
+    # cobj = CanvasObj(catalog='dog', im=Image.open('../temp/background/blank.png'))
+    # cobj.config()
+    
     return None
 
 
